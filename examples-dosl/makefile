@@ -81,7 +81,7 @@ PROFILE = -pg
 WARNS = -w
 
 LIBS = -lm
-LIBS_OPENCV = `pkg-config --cflags --libs opencv` -L/usr/local/share/OpenCV/3rdparty/lib/  # The -L option fixes bug with libippicv
+LIBS_OPENCV = `pkg-config --cflags --libs opencv4` -L/usr/local/share/OpenCV/3rdparty/lib/  # The -L option fixes bug with libippicv
 LIBS_OPENGL = -lglut -lGLU -lGL -lXi -lXmu -lX11 -lXext
 LIBS_MATHEVAL = -lmatheval
 #LIBS_ARMADILLO = -larmadillo  #`pkg-config --cflags --libs armadillo`
@@ -167,7 +167,7 @@ map2d_encapsulated_HomotopyPathPlanning: cv_test
 
 # --------------------------------------------
 ADVANCED_FOLDER=src/advanced
-advanced:  demo2d_PathPlanning  map2d_PathPlanning  map2d_VoronoiPartitioning  map2d_Delaunay  map2d_HomotopyPathPlanning  nonuniform2d_PathPlanning  robotArm_PathPlanning
+advanced:  demo2d_PathPlanning  map2d_PathPlanning  map2d_VoronoiPartitioning  map2d_Delaunay  map2d_HomotopyPathPlanning  map2d_wall_Homotopy  nonuniform2d_PathPlanning  robotArm_PathPlanning
 
 
 .PHONY: demo2d_PathPlanning
@@ -210,6 +210,14 @@ map2d_HomotopyPathPlanning: cv_test json_test
 		$(CC) $(CFLAGS) $(WARNS) $(INC_LOCAL) $(INC_DOSL) -o $(BIN_FOLDER)/$@ $(ADVANCED_FOLDER)/$@.cpp $(LIB_FOLDERS) $(LIBS) $(LIBS_OPENCV) -D_DOSL_ALGORITHM=$(DOSL_ALGORITHM)\
 	)
 
+.PHONY: map2d_wall_Homotopy
+map2d_wall_Homotopy: cv_test json_test
+	@printf "\nNow compiling '$(_BLUE)$@$(_CLEAR)'...\n"; printf $(DOSL_INTRO_STRING_DIR); printf $(DOSL_INTRO_STRING_ALG);
+	@$(call COMPILE_PROGRAM,\
+		$@,\
+		$(CC) $(CFLAGS) $(WARNS) $(INC_LOCAL) $(INC_DOSL) -o $(BIN_FOLDER)/$@ $(ADVANCED_FOLDER)/$@.cpp $(LIB_FOLDERS) $(LIBS) $(LIBS_OPENCV) -D_DOSL_ALGORITHM=$(DOSL_ALGORITHM)\
+	)
+
 .PHONY: nonuniform2d_PathPlanning
 nonuniform2d_PathPlanning: cv_test json_test matheval_test
 	@printf "\nNow compiling '$(_BLUE)$@$(_CLEAR)'...\n"; printf $(DOSL_INTRO_STRING_DIR); printf $(DOSL_INTRO_STRING_ALG);
@@ -229,7 +237,7 @@ robotArm_PathPlanning: cv_test json_test matheval_test
 
 # --------------------------------------------
 
-cv_examples:  demo2d_PathPlanning  map2d_PathPlanning  map2d_VoronoiPartitioning  map2d_Delaunay  map2d_HomotopyPathPlanning  nonuniform2d_PathPlanning  robotArm_PathPlanning  map2d_encapsulated_PathPlanning  map2d_encapsulated_HomotopyPathPlanning
+cv_examples:  demo2d_PathPlanning  map2d_PathPlanning  map2d_VoronoiPartitioning  map2d_Delaunay  map2d_HomotopyPathPlanning  map2d_wall_Homotopy  nonuniform2d_PathPlanning  robotArm_PathPlanning  map2d_encapsulated_PathPlanning  map2d_encapsulated_HomotopyPathPlanning
 
 encapsulated_examples: map2d_encapsulated_PathPlanning  map2d_encapsulated_HomotopyPathPlanning
 

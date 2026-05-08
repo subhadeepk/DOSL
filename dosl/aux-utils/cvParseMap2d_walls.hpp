@@ -228,6 +228,11 @@ public:
         if (expt_container["environment"]["pixmap"].exists()) {
             map_image_fName = expt_folderName + expt_container["environment"]["pixmap"].as<std::string>();
             my_map = cvParseMap2d (map_image_fName, true);
+            if (my_map.map.empty()) {
+                std::cerr << "Failed to load map image: '" << map_image_fName << "'." << std::endl;
+                std::cerr << "Tip: run from the 'examples-dosl' folder, or pass an absolute JSON path as argv[1]." << std::endl;
+                std::exit(1);
+            }
         }
         else if (expt_container["environment"]["width"].exists() && expt_container["environment"]["height"].exists()) {
             my_map = cvParseMap2d (cv::Mat (expt_container["environment"]["height"].as<int>(), 
@@ -295,83 +300,188 @@ public:
     
     // -----------------------------------------------------------
     
-    void updateHSignature (myNode &n, myNode &tn) { // updates h/H-signature of tn
-        int pm;
-        tn.h = n.h;
-        if (n.x!=tn.x) {
-            int p_start, p_end, p_step;
-            if (n.x<tn.x) { p_start = 0; p_end = my_map.repPts.size()-1; p_step = 1; }
-            else { p_start = my_map.repPts.size()-1; p_end = 0; p_step = -1; }
-        
-            for (int p=p_start; p!=p_end+p_step; p+=p_step) {
-                std::vector<double> this_rep_pt = { my_map.repPts[p].x+(p+1)*wiggle, my_map.repPts[p].y+(p+1)*wiggle };
-	            pm = 0;
-	            if (n.y>this_rep_pt[1] && tn.y>this_rep_pt[1]) {
-	                if (n.x<=this_rep_pt[0] && tn.x>this_rep_pt[0]) 
-	                    pm = 1;
-	                else if (n.x>this_rep_pt[0] && tn.x<=this_rep_pt[0]) 
-	                    pm = -1;
-	            }
-	            if (pm)
-	            {
-                    #if	PROB_HMTPY
-                    if (tn.h.size()>0 && tn.h[tn.h.size()-1]==-pm*(p+1))
-                        tn.h.pop_back();
-                    else
-                        tn.h.push_back(pm*(p+1));
-                    #else // homology
-                    tn.h[p] += pm;
-                    #endif
-	            }
-            }
+    // -----------------------------------------------------------
+    // Homotopy signature is now a *reduced word* over wall generators.
+    // A generator is an integer encoding:
+    //     gen = sign * (2 * componentLabel + orient + 1)
+    // where:
+    //     componentLabel = obsLabelMap.at<uchar>(blockedCell)  (>=1, set by
+    //         cvParseMap2d::computeRepresentativePoints via floodFill)
+    //     orient = 0 for a vertical wall (dx was flipped)
+    //              1 for a horizontal wall (dy was flipped)
+    //     sign   = +1 if the blocked cell lies to the +x/+y side of n,
+    //              -1 otherwise (records which face of the wall was hit)
+    // Consecutive identical generators cancel (retracing the same bounce),
+    // just like the old obstacle-ray word reduction.
+    //
+    // A single step can reflect off at most one wall; diagonal "corner" hits
+    // (8-connected) that would flip both dx and dy are rejected, because
+    // the reflection direction there is ambiguous and would correspond to
+    // two simultaneous generators.
+    // -----------------------------------------------------------
+
+    // Encode a wall-hit as a reduced-word generator and append to tn.h with
+    // cancellation against the last generator (rejects consecutive bounces
+    // on the same wall, mirroring the old obstacle-ray behaviour).
+    void appendWallGenerator (myNode &tn, int componentLabel, int orient, int sign) {
+        int gen = sign * (2 * componentLabel + orient + 1);
+        if (!tn.h.empty() && tn.h.back() == -gen) {
+            // opposite-sign same wall => cancel
+            tn.h.pop_back();
+        } else if (!tn.h.empty() && tn.h.back() == gen) {
+            // same-wall consecutive bounce => reject by cancellation
+            // (this is the "no consecutive ray crossing" rule, transplanted)
+            tn.h.pop_back();
+        } else {
+            tn.h.push_back(gen);
         }
     }
-    
+
+    // Read the obstacle-component label at an integer cell. Returns 0 for
+    // free cells or out-of-bounds, >=1 for obstacle components.
+    int obstacleComponentAt (int cx, int cy) {
+        if (cx < 0 || cy < 0 || cx >= my_map.width() || cy >= my_map.height())
+            return 1; // treat the outer frame as a single "boundary" component
+        if (my_map.isFree(cx, cy)) return 0;
+        if (!my_map.obsLabelMap.empty())
+            return (int) my_map.obsLabelMap.at<uchar>(cy, cx);
+        return 1; // fallback: one generic obstacle component
+    }
+
+    // Given a parent n and an attempted straight step to (n.x+dx, n.y+dy),
+    // produce either the straight successor or a reflected successor.
+    // Returns true on success and fills *tnOut / *costOut / updates tnOut->h
+    // (which is initialised from n.h on entry). Returns false if neither the
+    // straight step nor a valid reflection is available.
+    bool buildSuccessor (myNode &n, double dx, double dy,
+                         myNode *tnOut, double *costOut)
+    {
+        tnOut->h = n.h;
+
+        // --- straight step ---
+        myNode straight; straight.x = n.x + dx; straight.y = n.y + dy;
+        straight.put_in_grid();
+        if (isEdgeAccessible(n, straight)) {
+            tnOut->x = straight.x;
+            tnOut->y = straight.y;
+            tnOut->put_in_grid();
+            *costOut = sqrt(dx*dx + dy*dy);
+            return true;
+        }
+
+        // --- blocked: decide which wall was hit ---
+        // Inspect the cell the straight step tried to land on.
+        int bx = approx_floor(straight.x);
+        int by = approx_floor(straight.y);
+
+        // Must stay in the workspace for a reflection to be meaningful.
+        if (!isNodeInWorkspace(straight) && !(bx < 0 || by < 0
+                                           || bx >= my_map.width() || by >= my_map.height()))
+            return false;
+
+        // Decompose the displacement into which axis actually crossed into
+        // an obstacle cell. We probe the neighbours of n: if (n+dx, n.y) is
+        // obstructed we have a vertical wall; if (n.x, n+dy) is obstructed
+        // we have a horizontal wall.
+        int nix = approx_floor(n.x), niy = approx_floor(n.y);
+
+        bool vWall = false, hWall = false;
+        int vCompLabel = 0, hCompLabel = 0;
+
+        if (fabs(dx) > INFINITESIMAL_DOUBLE) {
+            int probeX = approx_floor(n.x + dx);
+            int l = obstacleComponentAt(probeX, niy);
+            if (l > 0) { vWall = true; vCompLabel = l; }
+        }
+        if (fabs(dy) > INFINITESIMAL_DOUBLE) {
+            int probeY = approx_floor(n.y + dy);
+            int l = obstacleComponentAt(nix, probeY);
+            if (l > 0) { hWall = true; hCompLabel = l; }
+        }
+
+        // If neither axis-probe identified a wall, the blocked cell is a
+        // pure diagonal (corner) obstruction -- use the diagonal cell's
+        // component as a corner. We reject corners: two generators at once
+        // would require a combined encoding and reflection is ambiguous.
+        if (!vWall && !hWall)
+            return false;
+
+        // Reject simultaneous vertical+horizontal hits (concave corner):
+        // ambiguous reflection direction, drop this successor.
+        if (vWall && hWall)
+            return false;
+
+        double rdx = dx, rdy = dy;
+        int orient, sign, compLabel;
+        if (vWall) {
+            rdx = -dx;                       // flip x-component
+            orient = 0;                      // vertical wall
+            sign   = (dx > 0) ? +1 : -1;     // which face of wall was hit
+            compLabel = vCompLabel;
+        } else { // hWall
+            rdy = -dy;                       // flip y-component
+            orient = 1;                      // horizontal wall
+            sign   = (dy > 0) ? +1 : -1;
+            compLabel = hCompLabel;
+        }
+
+        myNode reflected; reflected.x = n.x + rdx; reflected.y = n.y + rdy;
+        reflected.put_in_grid();
+
+        // The reflected cell must itself be a legal edge from n.
+        if (!isEdgeAccessible(n, reflected))
+            return false;
+
+        // Accept: commit the successor and update the signature word.
+        tnOut->x = reflected.x;
+        tnOut->y = reflected.y;
+        tnOut->put_in_grid();
+        appendWallGenerator(*tnOut, compLabel, orient, sign);
+
+        // Reflected edge length equals incident edge length; cost is the
+        // straight-step distance (we are "bouncing" in place of travelling
+        // through the wall).
+        *costOut = sqrt(dx*dx + dy*dy);
+        return true;
+    }
+
     void getSuccessors (myNode &n, std::vector<myNode>* s, std::vector<double>* c) // *** This must be defined
     {
         // This function should account for obstacles and size of environment.
         myNode tn;
-        
+        double cst;
+
         #if GRAPH_TYPE == 8
         for (int a=-1; a<=1; ++a)
             for (int b=-1; b<=1; ++b) {
                 if (a==0 && b==0) continue;
-                
+
                 #ifdef DOSL_ALGORITHM_SStar
                 int xParity = ((int)round(fabs(n.x))) % 2;
                 if (xParity==0 && (a!=0 && b==-1)) continue;
                 if (xParity==1 && (a!=0 && b==1)) continue;
                 #endif
-                
-                tn.x = n.x + a;
-                tn.y = n.y + b;
-                
-                if (!isEdgeAccessible(tn,n)) continue;
-                
-                updateHSignature(n,tn);
-                
+
+                if (!buildSuccessor(n, (double)a, (double)b, &tn, &cst)) continue;
+
                 s->push_back(tn);
-                double dx=tn.x-n.x, dy=tn.y-n.y;
-                c->push_back(sqrt(dx*dx+dy*dy)); 
+                c->push_back(cst);
             }
-        
+
         #elif GRAPH_TYPE == 6
-        double th;
+        double th, dx, dy;
         for (int a=0; a<6; ++a) {
             th = a * PI_BY_3;
-            tn.x = n.x + 1.0*cos(th);
-            tn.y = n.y + 1.0*sin(th);
-            
-            if (!isEdgeAccessible(tn,n)) continue;
-            
-            updateHSignature(n,tn);
-                
+            dx = 1.0*cos(th);
+            dy = 1.0*sin(th);
+
+            if (!buildSuccessor(n, dx, dy, &tn, &cst)) continue;
+
             s->push_back(tn);
-            c->push_back(1.0);
+            c->push_back(cst);
         }
-        
+
         #endif
-        
     }
     
     // -----------------------------------------------------------
@@ -494,7 +604,9 @@ int main(int argc, char *argv[])
     //RUNTIME_VERBOSE_SWITCH = 0;
     compute_program_path();
     
-    std::string expt_f_name = program_path+"../files/expt/basic_experiments.json", expt_name="L457_expt1";
+    // std::string expt_f_name = program_path+"../files/expt/basic_experiments.json", expt_name="L457_expt1";
+    std::string expt_f_name = program_path+"../files/expt/basic_experiments.json", expt_name="simple_expt1";
+
     if (argc == 2) {
         expt_name = argv[1];
     }
@@ -587,4 +699,3 @@ int main(int argc, char *argv[])
     cv::waitKey();
     #endif
 }
-

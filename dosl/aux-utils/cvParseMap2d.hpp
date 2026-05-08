@@ -69,7 +69,14 @@ public:
     
     void update (std::string fName, int computeRepPts=0, int obsSizeThresh=0, int threshold=DEFAULT_THRESHOLD) {
         // std::cout << "Reading image file: " << fName << std::endl;
-        map = cv::imread (fName, CV_LOAD_IMAGE_GRAYSCALE);
+        map = cv::imread (fName, cv::IMREAD_GRAYSCALE);
+        if (map.empty()) {
+            std::cerr << "cvParseMap2d: failed to read image file '" << fName << "'." << std::endl;
+            repPtsComputed = false;
+            repPts.clear();
+            obsLabelMap.release();
+            return;
+        }
         update (cv::Mat(), computeRepPts, obsSizeThresh, threshold);
     }
     
@@ -112,6 +119,9 @@ public:
             obsLabelMap.copyTo (retMat);
         else if (map_type==ORIGINAL_MAP && !map.empty())
             map.copyTo (retMat);
+
+        if (retMat.empty())
+            return (retMat);
         
         if (color_type == COLOR_MAP)
             cv::cvtColor (retMat, retMat, cv::COLOR_GRAY2RGB);
